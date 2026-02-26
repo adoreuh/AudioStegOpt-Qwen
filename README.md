@@ -446,7 +446,7 @@ MODEL_PARAMS = {
 }
 ```
 
-更多问题请参考 [docs/FAQ.md](docs/FAQ.md)
+更多问题请参考 [audio_stego/docs/FAQ.md](audio_stego/docs/FAQ.md)
 
 ---
 
