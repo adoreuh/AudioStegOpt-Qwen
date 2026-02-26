@@ -1,4 +1,4 @@
-# 音频信息隐藏系统
+# AudioStegOpt: Qwen-Enhanced Optimization for Audio Steganography
 
 <div align="center">
 
