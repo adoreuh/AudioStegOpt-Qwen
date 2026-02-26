@@ -1,212 +1,193 @@
-import requests
 import json
 import logging
-from typing import Dict, Optional
+import hashlib
+import time
+from typing import Dict, Optional, List
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
 GGUF_MODEL_AVAILABLE = False
-LOCAL_MODEL_AVAILABLE = False
+HF_MODEL_AVAILABLE = False
 
+# 尝试导入GGUF模型模块
 try:
     from .gguf_qwen import QwenLocalIntegration as GGUFIntegration
     GGUF_MODEL_AVAILABLE = True
 except ImportError:
     logger.debug("GGUF模型模块不可用")
 
+# 尝试导入HuggingFace模型模块
 try:
-    from .local_qwen import LocalQwenIntegration
-    LOCAL_MODEL_AVAILABLE = True
+    from .hf_qwen import QwenHFIntegration as HFIntegration
+    HF_MODEL_AVAILABLE = True
 except ImportError:
-    logger.debug("本地transformers模型模块不可用")
+    logger.debug("HuggingFace模型模块不可用")
+
+
+class ResponseCache:
+    """响应缓存管理器"""
+    def __init__(self, max_size: int = 100, ttl: int = 3600):
+        self._cache = {}
+        self._max_size = max_size
+        self._ttl = ttl
+    
+    def _generate_key(self, prompt: str, temperature: float, max_tokens: int) -> str:
+        """生成缓存键"""
+        key_data = f"{prompt}:{temperature}:{max_tokens}"
+        return hashlib.md5(key_data.encode()).hexdigest()
+    
+    def get(self, prompt: str, temperature: float, max_tokens: int) -> Optional[str]:
+        """获取缓存响应"""
+        key = self._generate_key(prompt, temperature, max_tokens)
+        if key in self._cache:
+            timestamp, response = self._cache[key]
+            if time.time() - timestamp < self._ttl:
+                logger.debug(f"缓存命中: {key[:8]}...")
+                return response
+            else:
+                del self._cache[key]
+        return None
+    
+    def set(self, prompt: str, temperature: float, max_tokens: int, response: str):
+        """设置缓存响应"""
+        if len(self._cache) >= self._max_size:
+            # 移除最旧的条目
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][0])
+            del self._cache[oldest_key]
+        
+        key = self._generate_key(prompt, temperature, max_tokens)
+        self._cache[key] = (time.time(), response)
+        logger.debug(f"缓存已设置: {key[:8]}...")
+    
+    def clear(self):
+        """清空缓存"""
+        self._cache.clear()
+        logger.info("响应缓存已清空")
 
 
 class QwenModelIntegration:
-    def __init__(self, base_url: str = "http://127.0.0.1:11434"):
-        self.base_url = base_url
+    """Qwen模型集成管理器 - 支持多格式模型"""
+    
+    MODEL_TYPE_GGUF = "gguf"
+    MODEL_TYPE_HF = "huggingface"
+    MODEL_TYPE_FALLBACK = "fallback"
+    
+    def __init__(self):
         self.model_name = "qwen3:0.6b"
-        self.api_endpoint = f"{base_url}/api/generate"
-        self.api_chat_endpoint = f"{base_url}/api/chat"
-        
-        self._gguf_model = None
-        self._local_model = None
-        self._use_gguf = False
-        self._use_local = False
-        self._ollama_available = False
+        self._model = None
+        self._model_type = self.MODEL_TYPE_FALLBACK
+        self._cache = ResponseCache(max_size=200, ttl=3600)  # 1小时TTL，增大缓存
+        self._stats = {
+            'total_requests': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'avg_latency_ms': 0
+        }
         
         self._initialize_model()
 
     def _initialize_model(self):
+        """初始化模型 - 按优先级尝试不同格式"""
+        
+        # 优先级1: HuggingFace格式 (直接从transformers加载)
+        if HF_MODEL_AVAILABLE:
+            try:
+                logger.info("尝试加载HuggingFace格式模型...")
+                hf_model = HFIntegration()
+                if hf_model.check_model_availability():
+                    self._model = hf_model
+                    self._model_type = self.MODEL_TYPE_HF
+                    logger.info("✓ HuggingFace格式模型已加载")
+                    return
+            except Exception as e:
+                logger.warning(f"HuggingFace模型加载失败: {e}")
+        
+        # 优先级2: GGUF格式 (通过llama-cpp加载)
         if GGUF_MODEL_AVAILABLE:
             try:
-                self._gguf_model = GGUFIntegration()
-                if self._gguf_model.check_model_availability():
-                    self._use_gguf = True
-                    logger.info("使用GGUF Qwen3:0.6b模型（直接加载）")
+                logger.info("尝试加载GGUF格式模型...")
+                gguf_model = GGUFIntegration()
+                if gguf_model.check_model_availability():
+                    self._model = gguf_model
+                    self._model_type = self.MODEL_TYPE_GGUF
+                    logger.info("✓ GGUF格式模型已加载")
                     return
             except Exception as e:
-                logger.warning(f"GGUF模型初始化失败: {e}")
+                logger.warning(f"GGUF模型加载失败: {e}")
         
-        if LOCAL_MODEL_AVAILABLE:
-            try:
-                self._local_model = LocalQwenIntegration()
-                if self._local_model.check_model_availability():
-                    self._use_local = True
-                    logger.info("使用本地transformers Qwen模型")
-                    return
-            except Exception as e:
-                logger.warning(f"本地transformers模型初始化失败: {e}")
-        
-        try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=2)
-            if response.status_code == 200:
-                models = response.json().get("models", [])
-                model_names = [m.get("name", "") for m in models]
-                if self.model_name in model_names:
-                    self._ollama_available = True
-                    logger.info("使用Ollama Qwen模型服务")
-        except Exception:
-            pass
+        # 回退模式
+        logger.warning("所有模型格式均不可用，将使用算法回退模式")
+        self._model_type = self.MODEL_TYPE_FALLBACK
 
     def generate_response(self, prompt: str, temperature: float = 0.7, 
                          max_tokens: int = 500) -> str:
-        if self._use_gguf and self._gguf_model:
-            return self._gguf_model.generate_response(prompt, temperature, max_tokens)
+        """生成文本响应 - 带缓存机制"""
+        # 检查缓存
+        cached_response = self._cache.get(prompt, temperature, max_tokens)
+        if cached_response:
+            self._stats['cache_hits'] += 1
+            return cached_response
         
-        if self._use_local and self._local_model:
-            return self._local_model.generate_response(prompt, temperature, max_tokens)
+        self._stats['cache_misses'] += 1
+        response = ""
         
-        if self._ollama_available:
-            return self._ollama_generate(prompt, temperature, max_tokens)
+        # 使用AI模型
+        if self._model_type != self.MODEL_TYPE_FALLBACK and self._model:
+            response = self._model.generate_response(prompt, temperature, max_tokens)
         
-        return self._get_fallback_response(prompt)
-
-    def _ollama_generate(self, prompt: str, temperature: float, max_tokens: int) -> str:
-        try:
-            payload = {
-                "model": self.model_name,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": max_tokens
-                }
-            }
-            
-            response = requests.post(self.api_endpoint, json=payload, timeout=30)
-            response.raise_for_status()
-            
-            result = response.json()
-            return result.get("response", "")
-            
-        except Exception as e:
-            logger.error(f"Ollama生成失败: {str(e)}")
-            return ""
+        # 如果模型未返回结果，使用回退响应
+        if not response:
+            response = self._get_fallback_response(prompt)
+        
+        # 缓存响应
+        if response:
+            self._cache.set(prompt, temperature, max_tokens, response)
+        
+        self._stats['total_requests'] += 1
+        return response
 
     def _get_fallback_response(self, prompt: str) -> str:
-        if "优化嵌入参数" in prompt or "layer" in prompt.lower():
+        """获取回退响应（当模型不可用时）"""
+        prompt_lower = prompt.lower()
+        
+        if "优化嵌入参数" in prompt or "layer" in prompt_lower:
             return '{"layer1_dwt": 33, "layer2_dct": 33, "layer3_lsb": 34, "recommendation": "使用默认的三层平均分配策略"}'
-        elif "质量" in prompt or "quality" in prompt.lower():
+        elif "质量" in prompt or "quality" in prompt_lower:
             return '{"quality_score": 75, "suitable_for_embedding": true, "recommended_method": "dwt", "capacity_estimate": 1000, "risk_factors": []}'
+        elif "报告" in prompt or "report" in prompt_lower:
+            return "音频信息隐藏操作已完成。技术指标良好，SNR和PSNR值在可接受范围内。建议进行安全性测试。"
         return ""
 
-    def chat_completion(self, messages: list, temperature: float = 0.7,
+    def chat_completion(self, messages: List[Dict], temperature: float = 0.7,
                        max_tokens: int = 500) -> str:
-        if self._use_gguf and self._gguf_model:
-            return self._gguf_model.chat_completion(messages, temperature, max_tokens)
-        
-        if self._use_local and self._local_model:
-            return self._local_model.chat_completion(messages, temperature, max_tokens)
-        
-        if self._ollama_available:
-            try:
-                payload = {
-                    "model": self.model_name,
-                    "messages": messages,
-                    "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
-                }
-                
-                response = requests.post(self.api_chat_endpoint, json=payload, timeout=30)
-                response.raise_for_status()
-                
-                result = response.json()
-                return result.get("message", {}).get("content", "")
-                
-            except Exception as e:
-                logger.error(f"Ollama聊天失败: {str(e)}")
-        
+        """聊天补全接口"""
+        if self._model_type != self.MODEL_TYPE_FALLBACK and self._model:
+            return self._model.chat_completion(messages, temperature, max_tokens)
         return ""
 
     def optimize_embedding_parameters(self, audio_info: Dict, message_length: int) -> Dict:
-        prompt = f"""
-作为音频信息隐藏专家，请根据以下信息优化嵌入参数：
-
-音频信息：
-- 时长: {audio_info.get('duration', 0):.2f}秒
-- 采样率: {audio_info.get('sample_rate', 0)}Hz
-- 长度: {audio_info.get('length', 0)}采样点
-- 最大振幅: {audio_info.get('max_amplitude', 0):.4f}
-
-消息长度: {message_length}字符
-
-请提供JSON格式的优化建议，包括：
-1. layer1_dwt: 第一层数据量（字符数）
-2. layer2_dct: 第二层数据量（字符数）
-3. layer3_lsb: 第三层数据量（字符数）
-4. recommendation: 优化建议说明
-
-确保三层数据量总和等于{message_length}。
-只返回JSON，不要其他内容。
-"""
+        """优化嵌入参数"""
+        # 使用AI模型
+        if self._model_type != self.MODEL_TYPE_FALLBACK and self._model:
+            try:
+                return self._model.optimize_embedding_parameters(audio_info, message_length)
+            except Exception as e:
+                logger.error(f"AI优化失败，使用回退: {e}")
         
-        response = self.generate_response(prompt, temperature=0.3)
-        
-        try:
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                return json.loads(json_str)
-        except Exception as e:
-            logger.error(f"解析优化响应失败: {str(e)}")
-        
+        # 回退到默认分配
         return self._get_default_distribution(message_length)
 
     def analyze_audio_quality(self, audio_info: Dict) -> Dict:
-        prompt = f"""
-分析音频质量并给出信息隐藏建议：
-
-音频信息：
-- 时长: {audio_info.get('duration', 0):.2f}秒
-- 采样率: {audio_info.get('sample_rate', 0)}Hz
-- RMS值: {audio_info.get('rms', 0):.4f}
-- 最大振幅: {audio_info.get('max_amplitude', 0):.4f}
-
-请提供JSON格式的分析结果，包括：
-1. quality_score: 音频质量评分(0-100)
-2. suitable_for_embedding: 是否适合嵌入(true/false)
-3. recommended_method: 推荐的嵌入方法(dwt/dct/lsb/mixed)
-4. capacity_estimate: 预估容量(字符数)
-5. risk_factors: 风险因素列表
-
-只返回JSON，不要其他内容。
-"""
+        """分析音频质量"""
+        # 使用AI模型
+        if self._model_type != self.MODEL_TYPE_FALLBACK and self._model:
+            try:
+                return self._model.analyze_audio_quality(audio_info)
+            except Exception as e:
+                logger.error(f"AI分析失败，使用回退: {e}")
         
-        response = self.generate_response(prompt, temperature=0.3)
-        
-        try:
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
-            if json_start != -1 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                return json.loads(json_str)
-        except Exception as e:
-            logger.error(f"解析质量分析失败: {str(e)}")
-        
+        # 回退到默认分析
         return {
             "quality_score": 75,
             "suitable_for_embedding": True,
@@ -216,8 +197,8 @@ class QwenModelIntegration:
         }
 
     def generate_embedding_report(self, embedding_result: Dict) -> str:
-        prompt = f"""
-生成音频信息隐藏报告：
+        """生成嵌入报告"""
+        prompt = f"""生成音频信息隐藏报告：
 
 嵌入结果：
 - 操作类型: {embedding_result.get('operation', 'unknown')}
@@ -239,29 +220,30 @@ class QwenModelIntegration:
         return self.generate_response(prompt, temperature=0.5)
 
     def check_model_availability(self) -> bool:
-        if self._use_gguf and self._gguf_model:
-            return True
+        """检查模型是否可用"""
+        return self._model_type != self.MODEL_TYPE_FALLBACK and self._model is not None
+
+    def get_model_status(self) -> Dict:
+        """获取模型状态信息"""
+        status = {
+            "model_name": self.model_name,
+            "model_type": self._model_type,
+            "is_loaded": self.check_model_availability(),
+            "cache_size": len(self._cache._cache) if hasattr(self._cache, '_cache') else 0,
+            "stats": self._stats
+        }
         
-        if self._use_local and self._local_model:
-            return True
+        if self._model and hasattr(self._model, 'get_model_info'):
+            status.update(self._model.get_model_info())
         
-        if self._ollama_available:
-            return True
-        
-        try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
-            response.raise_for_status()
-            
-            models = response.json().get("models", [])
-            model_names = [model.get("name", "") for model in models]
-            
-            return self.model_name in model_names
-            
-        except Exception as e:
-            logger.debug(f"检查模型可用性失败: {str(e)}")
-            return False
+        return status
+
+    def clear_cache(self):
+        """清空响应缓存"""
+        self._cache.clear()
 
     def _get_default_distribution(self, total_length: int) -> Dict:
+        """获取默认分配策略"""
         layer1 = total_length // 3
         layer2 = total_length // 3
         layer3 = total_length - layer1 - layer2

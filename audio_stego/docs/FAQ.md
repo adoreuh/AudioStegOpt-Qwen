@@ -34,20 +34,25 @@ pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-c
 ## 模型相关
 
 ### Q5: 必须要有Qwen模型吗?
-**A**: 不是必须的。系统支持三种模式：
-1. **GGUF模型模式**: 直接加载本地模型文件
-2. **Ollama服务模式**: 通过Ollama API调用模型
-3. **回退模式**: 无模型时使用预设算法
+**A**: 不是必须的。系统支持两种模式：
+1. **本地模型模式**: 直接加载本地GGUF模型文件
+2. **回退模式**: 无模型时使用预设算法
 
 ### Q6: 如何配置模型路径?
-**A**: 编辑 `audio_stego/utils/gguf_qwen.py` 文件：
-```python
-OLLAMA_MODEL_PATH = r"D:\models\blobs\sha256-..."
+**A**: 将模型文件放置在以下路径：
+```
+audio_stego/models/qwen3-0.6b.gguf
+```
+
+或使用命令设置模型：
+```bash
+python -m audio_stego.utils.gguf_qwen --setup <模型路径>
 ```
 
 ### Q7: 模型加载很慢怎么办?
 **A**: 
 - 首次加载需要初始化，约5-10秒
+- 使用内存映射加速加载
 - 使用GPU加速可提升加载速度
 - 减小 `n_ctx` 参数可减少内存占用
 
@@ -164,6 +169,7 @@ logging.basicConfig(level=logging.DEBUG)
 1. 使用GPU加速 (安装CUDA版本的llama-cpp-python)
 2. 减小 `max_tokens` 参数
 3. 使用更小的模型
+4. 启用响应缓存机制
 
 ### Q22: 如何处理大音频文件?
 **A**: 
@@ -256,5 +262,5 @@ rm -rf audio_stego/uploads/*
 
 如有其他问题，请：
 1. 查看项目README.md
-2. 查看技术文档 TECHNICAL_DOCUMENTATION.md
+2. 查看技术文档 API.md
 3. 提交Issue到项目仓库
