@@ -24,7 +24,7 @@
 - **多格式支持** - WAV、MP3、FLAC
 - **质量评估** - SNR/PSNR音频质量指标
 - **Web界面** - 直观的可视化操作界面
-- **REST API** - 完整的API接口支持
+- **API** - 完整的API接口支持
 - **高性能** - 准确率提升15%，处理时间减少25%
 
 ---
@@ -36,27 +36,6 @@
 - Python 3.8+
 - 8GB+ 内存 (推荐16GB)
 - (可选) NVIDIA GPU 用于加速
-
-### 安装步骤
-
-```bash
-# 1. 克隆项目
-git clone <仓库地址>
-cd Mamba/audio_stego
-
-# 2. 安装依赖
-pip install -r requirements.txt
-
-# 3. 配置AI模型 (可选但推荐)
-# 将模型文件放置在 models/qwen_hf/ 目录
-# 或使用 scripts/deploy_model.py 自动部署
-
-# 4. 启动服务
-python api/app.py
-
-# 5. 访问Web界面
-# http://localhost:5000
-```
 
 ### 一键启动
 
@@ -179,7 +158,7 @@ AudioStegOpt/
 │       └── generation_config.json
 ├── audio_stego/
 │   └── models/
-│       └── qwen_hf/  (可选：也可以放在这里)
+│       └── qwen_hf/
 └── ...
 ```
 
@@ -345,7 +324,7 @@ POST /api/ai/analyze
 参数: audio
 ```
 
-详细API文档请参考 [docs/API.md](docs/API.md)
+详细API文档请参考 [audio_stego/docs/API.md](audio_stego/docs/API.md)
 
 ---
 
@@ -378,40 +357,6 @@ POST /api/ai/analyze
 | 准确率 | 85% | 100% | +15% |
 | 处理时间 | 2.5s | 1.875s | -25% |
 | SNR | 30dB | 31.5dB | +5% |
-
----
-
-## 开发指南
-
-### 添加新功能
-
-1. 在 `core/` 目录添加新算法
-2. 在 `api/app.py` 添加API端点
-3. 更新 `docs/API.md` 文档
-
----
-
-## 性能基准
-
-### 测试环境
-- CPU: Intel i7 / AMD Ryzen 7
-- 内存: 16GB
-- Python: 3.10+
-
-### 测试结果
-
-```
-测试文件: 3个音频文件 (FLAC, MP3)
-消息长度: 42字符
-
-原始算法:
-  平均准确率: 85.00%
-  平均耗时: 2.500s
-
-AI优化算法:
-  平均准确率: 100.00% ⬆️ +15%
-  平均耗时: 1.875s ⬇️ -25%
-```
 
 ---
 
